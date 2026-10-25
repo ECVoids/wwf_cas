@@ -1,0 +1,16 @@
+# Dependencias y compilación
+node_modules/
+dist/
+
+# Variables de entorno
+.env
+.env.*
+
+# Ejecutables y archivos de instalación
+*.exe
+*.msi
+*.iso
+
+# Instaladores y herramientas locales
+postgresql_18.exe
+kubectl.exe

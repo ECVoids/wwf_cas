@@ -7,7 +7,7 @@ type Toast = { kind: 'success' | 'error' | 'info'; text: string } | null;
 type MultiplierEvent = { id?: string; factor: number; applied_at?: string };
 type PointsBalance = { username: string; base_points: number; multiplier: number; redeemed_points: number; available_points: number };
 type RedemptionResult = { username: string; points_before: number; points_deducted: number; points_after: number; redeemed_at: string };
-const ADMIN_USERNAME = (import.meta.env.VITE_ADMIN_USERNAME || 'admin-feria').trim().toLowerCase(); // EDITAR AQUÍ el nombre reservado del administrador.
+const ADMIN_USERNAME = (import.meta.env.VITE_ADMIN_USERNAME || 'cas-admin').trim().toLowerCase(); // EDITAR AQUÍ el nombre reservado del administrador.
 const demoActivities: Activity[] = [
   { id: 'demo-1', name: 'Visita el stand de innovación', description: 'Conoce una demostración y pregunta por una de las soluciones presentadas.', points: 20, password: 'INNOVA24', is_active: true },
   { id: 'demo-2', name: 'Participa en el reto', description: 'Completa el reto corto del equipo logístico.', points: 30, password: 'RETO2026', is_active: true },

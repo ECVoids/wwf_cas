@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Activity as ActivityIcon, Award, CheckCircle2, ChevronRight, CircleHelp, Clipboard, Copy, KeyRound, LogOut, Plus, ShieldCheck, Sparkles, Trash2, Users, X } from 'lucide-react';
+import { Activity as ActivityIcon, Award, CheckCircle2, ChevronRight, CircleHelp, Clipboard, Copy, Gift, History, KeyRound, LogOut, Plus, ShieldCheck, Sparkles, Trash2, Users, X } from 'lucide-react';
 import { supabase, type Activity, type Completion, type UserProfile, cleanUsername } from './lib';
 
 type Mode = 'login' | 'user' | 'admin';
 type Toast = { kind: 'success' | 'error' | 'info'; text: string } | null;
 type MultiplierEvent = { id?: string; factor: number; applied_at?: string };
+type PointsBalance = { username: string; base_points: number; multiplier: number; redeemed_points: number; available_points: number };
+type RedemptionResult = { username: string; points_before: number; points_deducted: number; points_after: number; redeemed_at: string };
 const ADMIN_USERNAME = (import.meta.env.VITE_ADMIN_USERNAME || 'admin-feria').trim().toLowerCase(); // EDITAR AQUÍ el nombre reservado del administrador.
 const demoActivities: Activity[] = [
   { id: 'demo-1', name: 'Visita el stand de innovación', description: 'Conoce una demostración y pregunta por una de las soluciones presentadas.', points: 20, password: 'INNOVA24', is_active: true },
@@ -33,13 +35,19 @@ export default function App() {
     return demoActivities;
   });
   const [completions, setCompletions] = useState<Completion[]>([]);
+  const [redeemedPoints, setRedeemedPoints] = useState(0);
+  const [redemptionUsername, setRedemptionUsername] = useState('');
+  const [redemptionPoints, setRedemptionPoints] = useState('');
+  const [redemptionDescription, setRedemptionDescription] = useState('');
+  const [redemptionPreview, setRedemptionPreview] = useState<PointsBalance | null>(null);
+  const [redemptionResult, setRedemptionResult] = useState<RedemptionResult | null>(null);
   const [multiplierEvents, setMultiplierEvents] = useState<MultiplierEvent[]>([]);
   const [toast, setToast] = useState<Toast>(null);
   const [busy, setBusy] = useState(false);
   const [online] = useState(Boolean(supabase));
   const [activityModal, setActivityModal] = useState<Activity | null>(null);
   const [code, setCode] = useState('');
-  const [tab, setTab] = useState<'activities' | 'manage' | 'multiplier'>('activities');
+  const [tab, setTab] = useState<'activities' | 'manage' | 'multiplier' | 'redeem'>('activities');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [activityName, setActivityName] = useState('');
   const [activityDescription, setActivityDescription] = useState('');
@@ -57,7 +65,7 @@ export default function App() {
   const completedIds = useMemo(() => new Set(completions.map(c => c.activity_id)), [completions]);
   const basePoints = useMemo(() => completions.reduce((sum, c) => sum + Number(c.points_awarded), 0), [completions]);
   const multiplier = currentUser?.multiplier ?? 1;
-  const totalPoints = Math.round(basePoints * multiplier);
+  const totalPoints = Math.max(0, Math.round(basePoints * multiplier) - redeemedPoints);
 
   useEffect(() => { if (toast) { const t = window.setTimeout(() => setToast(null), 3600); return () => window.clearTimeout(t); } }, [toast]);
   useEffect(() => { if (!supabase) localStorage.setItem('feria-demo-activities', JSON.stringify(activities)); }, [activities]);
@@ -67,18 +75,20 @@ export default function App() {
     let alive = true;
     const load = async () => {
       const isAdminName = currentUser.username === ADMIN_USERNAME;
-      const [actsResult, doneResult, profileResult, multiplierResult] = await Promise.all([
+      const [actsResult, doneResult, profileResult, multiplierResult, redemptionResult] = await Promise.all([
         isAdminName
           ? client.rpc('admin_list_activities', { p_admin_username: currentUser.username })
           : client.from('activities').select('id, name, description, points, is_active, image_data, created_at').eq('is_deleted', false).order('created_at', { ascending: true }),
         isAdminName ? Promise.resolve({ data: [], error: null }) : client.rpc('get_user_completions', { p_username: currentUser.username }),
         isAdminName ? Promise.resolve({ data: currentUser, error: null }) : client.from('profiles').select('*').eq('id', currentUser.id).single(),
         isAdminName ? Promise.resolve({ data: [], error: null }) : client.rpc('get_user_multiplier_events', { p_username: currentUser.username }),
+        isAdminName ? Promise.resolve({ data: [], error: null }) : client.rpc('get_user_redemption_total', { p_username: currentUser.username }),
       ]);
       if (!alive) return;
-      if (actsResult.error || doneResult.error || profileResult.error || multiplierResult.error) { setToast({ kind: 'error', text: 'No se pudieron cargar todos los datos. Revisa la configuración de Supabase y sus políticas.' }); return; }
+      if (actsResult.error || doneResult.error || profileResult.error || multiplierResult.error || redemptionResult.error) { setToast({ kind: 'error', text: 'No se pudieron cargar todos los datos. Revisa la configuración de Supabase y sus políticas.' }); return; }
       setActivities((actsResult.data ?? []) as Activity[]); setCompletions((doneResult.data ?? []) as Completion[]);
       setMultiplierEvents((multiplierResult.data ?? []) as MultiplierEvent[]);
+      setRedeemedPoints(Number(redemptionResult.data ?? 0));
       if (profileResult.data) setCurrentUser(profileResult.data as UserProfile);
     };
     void load();
@@ -86,6 +96,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'activities' }, () => void load())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'completions', filter: `user_id=eq.${currentUser.id}` }, () => void load())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${currentUser.id}` }, () => void load())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'point_redemptions', filter: `user_id=eq.${currentUser.id}` }, () => void load())
       .subscribe();
     return () => { alive = false; void client.removeChannel(channel); };
   }, [currentUser?.id]);
@@ -130,6 +141,7 @@ export default function App() {
         setCompletions(done ? JSON.parse(done) as Completion[] : []);
         const events = localStorage.getItem(`feria-demo-multipliers:${normalized}`);
         setMultiplierEvents(events ? JSON.parse(events) as MultiplierEvent[] : []);
+        setRedeemedPoints(Number(localStorage.getItem(`feria-demo-redemptions:${normalized}`) || 0));
         setCurrentUser(user); setMode('user');
         notify(saved ? 'Sesión iniciada.' : 'Registro creado. ¡Bienvenido a la feria!');
         return;
@@ -142,12 +154,15 @@ export default function App() {
       const { data: events, error: eventsError } = await supabase.rpc('get_user_multiplier_events', { p_username: normalized });
       if (eventsError) throw eventsError;
       setMultiplierEvents((events ?? []) as MultiplierEvent[]);
+      const { data: redeemed, error: redeemedError } = await supabase.rpc('get_user_redemption_total', { p_username: normalized });
+      if (redeemedError) throw redeemedError;
+      setRedeemedPoints(Number(redeemed ?? 0));
       notify('Acceso correcto.');
     } catch (e) { notify(e instanceof Error ? e.message : 'No se pudo iniciar sesión.', 'error'); }
     finally { setBusy(false); }
   }
 
-  function signOut() { setMode('login'); setCurrentUser(null); setCompletions([]); setMultiplierEvents([]); setActivityModal(null); setUsername(''); setTab('activities'); }
+  function signOut() { setMode('login'); setCurrentUser(null); setCompletions([]); setMultiplierEvents([]); setRedeemedPoints(0); setActivityModal(null); setUsername(''); setTab('activities'); }
 
   async function completeActivity() {
     if (!currentUser || !activityModal) return;
@@ -285,6 +300,73 @@ export default function App() {
     } catch (e) { notify(e instanceof Error ? e.message : 'No se pudo aplicar el multiplicador.', 'error'); }
   }
 
+  async function lookupRedemptionBalance() {
+    const normalized = cleanUsername(redemptionUsername);
+    if (!normalized) { notify('Escribe el nombre del usuario.', 'error'); return; }
+    try {
+      if (!supabase) {
+        const user = localStorage.getItem(`feria-demo-user:${normalized}`);
+        if (!user) { setRedemptionPreview(null); notify('No se encontró ese usuario.', 'error'); return; }
+        const profile = JSON.parse(user) as UserProfile;
+        const done = JSON.parse(localStorage.getItem(`feria-demo-completions:${normalized}`) || '[]') as Completion[];
+        const base = done.reduce((sum, c) => sum + Number(c.points_awarded), 0);
+        const redeemed = Number(localStorage.getItem(`feria-demo-redemptions:${normalized}`) || 0);
+        setRedemptionPreview({ username: normalized, base_points: base, multiplier: profile.multiplier ?? 1, redeemed_points: redeemed, available_points: Math.max(0, Math.round(base * (profile.multiplier ?? 1)) - redeemed) });
+        setRedemptionResult(null);
+        return;
+      }
+      const { data, error } = await supabase.rpc('admin_get_points_balance', { p_admin_username: currentUser?.username, p_username: normalized });
+      if (error) throw error;
+      const balance = (Array.isArray(data) ? data[0] : data) as PointsBalance | undefined;
+      setRedemptionPreview(balance ?? null);
+      setRedemptionResult(null);
+      if (!balance) notify('No se encontró ese usuario.', 'error');
+    } catch (e) { notify(getSupabaseErrorMessage(e, 'No se pudo consultar el saldo del participante.'), 'error'); }
+  }
+
+  async function redeemPoints() {
+    if (!redemptionPreview) return;
+    const points = Number(redemptionPoints);
+    if (!Number.isInteger(points) || points <= 0) { notify('Ingresa una cantidad entera de puntos mayor que cero.', 'error'); return; }
+    if (points > redemptionPreview.available_points) { notify('El descuento no puede superar los puntos disponibles.', 'error'); return; }
+    const reward = redemptionDescription.trim() || 'Canje de premio';
+    const confirmed = window.confirm(`Confirmar canje para ${redemptionPreview.username}?\\n\\nPremio: ${reward}\\nPuntos a descontar: ${points}\\nSaldo restante: ${redemptionPreview.available_points - points}`);
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      if (supabase) {
+        const { data, error } = await supabase.rpc('admin_redeem_points', {
+          p_admin_username: currentUser?.username,
+          p_username: redemptionPreview.username,
+          p_points: points,
+          p_reward_description: reward,
+        });
+        if (error) throw error;
+        const result = (Array.isArray(data) ? data[0] : data) as RedemptionResult;
+        setRedemptionResult(result);
+        const { data: refreshed, error: refreshError } = await supabase.rpc('admin_get_points_balance', { p_admin_username: currentUser?.username, p_username: redemptionPreview.username });
+        if (refreshError) throw refreshError;
+        const balance = (Array.isArray(refreshed) ? refreshed[0] : refreshed) as PointsBalance | undefined;
+        setRedemptionPreview(balance ?? null);
+      } else {
+        const user = JSON.parse(localStorage.getItem(`feria-demo-user:${redemptionPreview.username}`) || '{}') as UserProfile;
+        const done = JSON.parse(localStorage.getItem(`feria-demo-completions:${redemptionPreview.username}`) || '[]') as Completion[];
+        const base = done.reduce((sum, c) => sum + Number(c.points_awarded), 0);
+        const before = Math.max(0, Math.round(base * (user.multiplier ?? 1)) - redemptionPreview.redeemed_points);
+        if (points > before) throw new Error('El descuento supera los puntos disponibles.');
+        const redeemed = redemptionPreview.redeemed_points + points;
+        localStorage.setItem(`feria-demo-redemptions:${redemptionPreview.username}`, String(redeemed));
+        const result = { username: redemptionPreview.username, points_before: before, points_deducted: points, points_after: before - points, redeemed_at: new Date().toISOString() };
+        setRedemptionResult(result);
+        setRedemptionPreview({ ...redemptionPreview, redeemed_points: redeemed, available_points: before - points });
+      }
+      notify(`Canje registrado: se descontaron ${points} puntos a ${redemptionPreview.username}.`);
+      setRedemptionPoints('');
+      setRedemptionDescription('');
+    } catch (e) { notify(getSupabaseErrorMessage(e, 'No se pudo registrar el canje.'), 'error'); }
+    finally { setBusy(false); }
+  }
+
   async function refreshAdminData() {
     if (!supabase) { notify('En modo demostración, los usuarios solo existen en este navegador.', 'info'); return; }
     const { data, error } = await supabase.rpc('admin_list_profiles', { p_admin_username: currentUser?.username });
@@ -314,8 +396,8 @@ export default function App() {
   return <div className="app-shell">
     <header className="topbar"><div className="topbar-inner"><button className="brand-lockup brand-button" onClick={() => setTab('activities')}><img src="/wwf-logo.png" alt="WWF" className="brand-partner-logo wwf-brand-logo"/><img src="/cas-logo.jpg" alt="CAS" className="brand-partner-logo cas-brand-logo"/><div className="brand-wording"><div className="brand-name">WWF Juntos por la vida</div><div className="brand-caption">PUNTOS Y ACTIVIDADES</div></div></button><div className="topbar-right"><div className="connection-chip"><span className={`status-dot ${online ? 'is-online' : ''}`}/>{online ? 'En línea' : 'Demo'}</div><button className="user-chip" onClick={signOut} title="Cerrar sesión"><span className="avatar">{currentUser?.username.slice(0, 1).toUpperCase()}</span><span className="user-chip-name">{currentUser?.username}</span><LogOut size={16}/></button></div></div></header>
     <main className="page-wrap">
-      <section className="profile-banner"><div className="profile-left"><div className="profile-avatar">{isAdmin ? <ShieldCheck size={25}/> : currentUser?.username.slice(0, 1).toUpperCase()}</div><div className="profile-info"><div className="profile-eyebrow">{isAdmin ? 'PANEL DE CONTROL' : 'TU PERFIL'}</div><h1>{currentUser?.username}</h1><div className="profile-subtitle">{isAdmin ? 'Administra actividades y puntuaciones' : '¡Sigue participando para sumar más!'}</div></div></div><div className="points-block"><div className="points-label"><Award size={16}/> {isAdmin ? 'ACTIVIDADES ACTIVAS' : 'PUNTOS ACUMULADOS'}</div><div className="points-number">{isAdmin ? activeCount : totalPoints.toLocaleString('es-CO')}<span>{isAdmin ? 'activas' : 'pts'}</span></div>{!isAdmin && <div className="points-footnote">Base: {basePoints.toLocaleString('es-CO')} pts</div>}{!isAdmin && multiplierEvents.length > 0 && <div className="multiplier-result"><span>Multiplicadores: {multiplierEvents.map(e => `×${Number(e.factor).toLocaleString('es-CO')}`).join(' · ')}</span></div>}</div></section>
-      {isAdmin && <nav className="admin-tabs"><button className={tab === 'activities' ? 'tab active' : 'tab'} onClick={() => setTab('activities')}><ActivityIcon size={17}/> Actividades y códigos</button><button className={tab === 'manage' ? 'tab active' : 'tab'} onClick={() => { setTab('manage'); if (!editingId) resetActivityForm(); }}><Plus size={17}/> {editingId ? 'Editar actividad' : 'Crear actividad'}</button><button className={tab === 'multiplier' ? 'tab active' : 'tab'} onClick={() => { setTab('multiplier'); void refreshAdminData(); }}><Sparkles size={17}/> Multiplicadores</button></nav>}
+      <section className="profile-banner"><div className="profile-left"><div className="profile-avatar">{isAdmin ? <ShieldCheck size={25}/> : currentUser?.username.slice(0, 1).toUpperCase()}</div><div className="profile-info"><div className="profile-eyebrow">{isAdmin ? 'PANEL DE CONTROL' : 'TU PERFIL'}</div><h1>{currentUser?.username}</h1><div className="profile-subtitle">{isAdmin ? 'Administra actividades y puntuaciones' : '¡Sigue participando para sumar más!'}</div></div></div><div className="points-block"><div className="points-label"><Award size={16}/> {isAdmin ? 'ACTIVIDADES ACTIVAS' : 'PUNTOS ACUMULADOS'}</div><div className="points-number">{isAdmin ? activeCount : totalPoints.toLocaleString('es-CO')}<span>{isAdmin ? 'activas' : 'pts'}</span></div>{!isAdmin && <div className="points-footnote">Base: {basePoints.toLocaleString('es-CO')} pts</div>}{!isAdmin && redeemedPoints > 0 && <div className="points-footnote">Canjeados: {redeemedPoints.toLocaleString('es-CO')} pts</div>}{!isAdmin && multiplierEvents.length > 0 && <div className="multiplier-result"><span>Multiplicadores: {multiplierEvents.map(e => `×${Number(e.factor).toLocaleString('es-CO')}`).join(' · ')}</span></div>}</div></section>
+      {isAdmin && <nav className="admin-tabs"><button className={tab === 'activities' ? 'tab active' : 'tab'} onClick={() => setTab('activities')}><ActivityIcon size={17}/> Actividades y códigos</button><button className={tab === 'manage' ? 'tab active' : 'tab'} onClick={() => { setTab('manage'); if (!editingId) resetActivityForm(); }}><Plus size={17}/> {editingId ? 'Editar actividad' : 'Crear actividad'}</button><button className={tab === 'multiplier' ? 'tab active' : 'tab'} onClick={() => { setTab('multiplier'); void refreshAdminData(); }}><Sparkles size={17}/> Multiplicadores</button><button className={tab === 'redeem' ? 'tab active' : 'tab'} onClick={() => { setTab('redeem'); setRedemptionPreview(null); setRedemptionResult(null); }}><Gift size={17}/> Canje de premios</button></nav>}
 
       {(!isAdmin || tab === 'activities') && <>
         <section className="section-heading"><div><div className="eyebrow">{isAdmin ? 'GESTIÓN DE ACTIVIDADES' : 'DESCUBRE · PARTICIPA · GANA'}</div><h2>{isAdmin ? 'Actividades y contraseñas' : 'Actividades disponibles'}</h2><p>{isAdmin ? 'Comparte el código con los participantes cuando hayan cumplido los requisitos.' : 'Completa las actividades y pide el código al encargado de cada local.'}</p></div><div className="activity-count"><span>{displayedActivities.filter(a => isAdmin || !completedIds.has(a.id)).length}</span><span>{isAdmin ? 'actividades' : 'por completar'}</span></div></section>
@@ -334,6 +416,8 @@ export default function App() {
       {isAdmin && tab === 'manage' && <section className="admin-panel"><div className="panel-heading"><div className="panel-icon"><Plus size={21}/></div><div><h2>{editingId ? 'Editar actividad' : 'Crear nueva actividad'}</h2><p>{editingId ? 'Actualiza los datos de esta actividad.' : 'Define la contraseña que compartirás con el encargado de la actividad.'}</p></div></div><form className="admin-form" onSubmit={e => void saveActivity(e)}><div className="form-field"><label htmlFor="activityName">Nombre de la actividad</label><input id="activityName" value={activityName} onChange={e => setActivityName(e.target.value)} placeholder="Ej. Visita el stand de tecnología" required maxLength={90}/></div><div className="form-field"><label htmlFor="activityDescription">Descripción y requisitos</label><textarea id="activityDescription" value={activityDescription} onChange={e => setActivityDescription(e.target.value)} placeholder="Explica qué debe hacer el participante…" rows={4} required maxLength={500}/></div><div className="form-field"><label htmlFor="activityPassword">Contraseña personalizada</label><input id="activityPassword" value={activityPassword} onChange={e => setActivityPassword(e.target.value.toUpperCase().replace(/\s/g, ''))} placeholder="Ej. WWFVIDA26" required maxLength={32} autoComplete="off"/><span className="field-hint">Define el código que el encargado entregará al participante. Usa un código único y fácil de comunicar.</span></div><div className="form-field"><label htmlFor="activityImage">Logo o imagen (opcional)</label><input id="activityImage" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" onChange={e => { const file = e.target.files?.[0]; if (!file) return; if (file.size > 400 * 1024) { notify('La imagen debe pesar máximo 400 KB.', 'error'); e.target.value = ''; return; } if (!file.type.startsWith('image/')) { notify('Selecciona un archivo de imagen.', 'error'); e.target.value = ''; return; } const reader = new FileReader(); reader.onload = () => setActivityImage(String(reader.result)); reader.onerror = () => notify('No se pudo leer la imagen.', 'error'); reader.readAsDataURL(file); }}/><span className="field-hint">PNG, JPG, WEBP, GIF o SVG. Máximo 400 KB. La imagen aparecerá junto al nombre de la actividad.</span>{activityImage && <div className="image-preview-row"><img src={activityImage} alt="Vista previa del logo"/><button type="button" className="text-button delete-activity-button" onClick={() => { setActivityImage(null); const input = document.getElementById('activityImage') as HTMLInputElement | null; if (input) input.value = ''; }}>Quitar imagen</button></div>}</div><div className="form-field form-field-short"><label htmlFor="activityPoints">Puntaje fijo</label><div className="number-input-wrap"><input id="activityPoints" type="number" min="1" max="100000" step="1" value={activityPoints} onChange={e => setActivityPoints(e.target.value)} required/><span>puntos</span></div><span className="field-hint">El puntaje se asigna una sola vez por participante.</span></div>{editingId && <label className="toggle-row"><input type="checkbox" checked={activityActive} onChange={e => setActivityActive(e.target.checked)}/><span><strong>Actividad activa</strong><small>Si la desactivas, dejará de aparecer a los participantes.</small></span></label>}<div className="form-actions">{editingId && <button type="button" className="button button-light" onClick={resetActivityForm}>Cancelar edición</button>}<button className="button button-primary" disabled={busy}>{busy ? 'Guardando…' : editingId ? 'Guardar cambios' : 'Crear actividad'}<ChevronRight size={17}/></button></div></form></section>}
 
       {isAdmin && tab === 'multiplier' && <section className="admin-panel multiplier-panel"><div className="panel-heading"><div className="panel-icon purple"><Sparkles size={21}/></div><div><h2>Multiplicador de puntos</h2><p>Aplica un multiplicador adicional al total actual. Cada aplicación se acumula con las anteriores.</p></div></div><div className="multiplier-explainer"><div className="math-example"><span>Puntos base</span><strong>100</strong></div><span className="math-symbol">×</span><div className="math-example"><span>Factor adicional</span><strong className="purple-text">2×</strong></div><span className="math-symbol">=</span><div className="math-example result-example"><span>Total resultante</span><strong>200</strong></div></div><form className="admin-form" onSubmit={e => { e.preventDefault(); void lookupMultiplier(); }}><div className="form-field"><label htmlFor="multiplierUsername">Nombre de usuario del participante</label><div className="input-action-row"><input id="multiplierUsername" value={multiplierUsername} onChange={e => { setMultiplierUsername(e.target.value); setMultiplierPreview(null); setMultiplierResult(null); }} placeholder="Ej. isabella.m" required/><button className="button button-dark" type="submit">Buscar usuario</button></div></div></form>{multiplierPreview && <div className="user-found-card"><div className="found-user"><div className="avatar avatar-large">{multiplierPreview.username.slice(0, 1).toUpperCase()}</div><div><strong>{multiplierPreview.username}</strong><span>Multiplicador acumulado actual: ×{Number(multiplierPreview.multiplier).toLocaleString('es-CO')}</span></div></div><div className="form-field"><label htmlFor="multiplierValue">Multiplicador adicional</label><select id="multiplierValue" value={multiplierValue} onChange={e => setMultiplierValue(e.target.value)}><option value="1">×1 — Sin cambio adicional</option><option value="1.5">×1,5</option><option value="2">×2 — Doble puntaje</option><option value="3">×3 — Triple puntaje</option><option value="4">×4</option><option value="5">×5</option><option value="10">×10</option></select></div><button className="button button-primary button-wide" onClick={() => void applyMultiplier()}>Aplicar multiplicador <Sparkles size={17}/></button>{multiplierResult !== null && <p className="success-note"><CheckCircle2 size={16}/> Multiplicador ×{multiplierResult} aplicado a {multiplierPreview.username}.</p>}</div>}<div className="admin-warning"><ShieldCheck size={17}/><p>Cada factor se multiplica por el acumulado anterior. Se conserva el puntaje base y el historial de cada multiplicador aplicado.</p></div></section>}
+
+      {isAdmin && tab === 'redeem' && <section className="admin-panel multiplier-panel"><div className="panel-heading"><div className="panel-icon"><Gift size={21}/></div><div><h2>Canje de premios</h2><p>Descuenta los puntos que un participante utiliza para reclamar un premio. Cada canje queda registrado en el historial.</p></div></div><form className="admin-form" onSubmit={e => { e.preventDefault(); void lookupRedemptionBalance(); }}><div className="form-field"><label htmlFor="redemptionUsername">Nombre de usuario del participante</label><div className="input-action-row"><input id="redemptionUsername" value={redemptionUsername} onChange={e => { setRedemptionUsername(e.target.value); setRedemptionPreview(null); setRedemptionResult(null); }} placeholder="Ej. isabella.m" required/><button className="button button-dark" type="submit" disabled={busy}>Consultar saldo</button></div></div></form>{redemptionPreview && <div className="user-found-card"><div className="found-user"><div className="avatar avatar-large">{redemptionPreview.username.slice(0, 1).toUpperCase()}</div><div><strong>{redemptionPreview.username}</strong><span>Multiplicador acumulado: ×{Number(redemptionPreview.multiplier).toLocaleString('es-CO')}</span></div></div><div className="multiplier-explainer"><div className="math-example"><span>Puntos base</span><strong>{Number(redemptionPreview.base_points).toLocaleString('es-CO')}</strong></div><span className="math-symbol">−</span><div className="math-example"><span>Ya canjeados</span><strong>{Number(redemptionPreview.redeemed_points).toLocaleString('es-CO')}</strong></div><span className="math-symbol">=</span><div className="math-example result-example"><span>Disponibles</span><strong>{Number(redemptionPreview.available_points).toLocaleString('es-CO')}</strong></div></div><div className="form-field"><label htmlFor="redemptionDescription">Premio entregado (opcional)</label><input id="redemptionDescription" value={redemptionDescription} onChange={e => setRedemptionDescription(e.target.value)} placeholder="Ej. Bono de alimentación" maxLength={120}/></div><div className="form-field"><label htmlFor="redemptionPoints">Puntos que se descontarán</label><input id="redemptionPoints" type="number" min="1" max={redemptionPreview.available_points} step="1" value={redemptionPoints} onChange={e => setRedemptionPoints(e.target.value)} placeholder="Ej. 300" required/><span className="field-hint">No puedes descontar más puntos de los que están disponibles.</span></div><button className="button button-primary button-wide" disabled={busy || !redemptionPoints || Number(redemptionPoints) > redemptionPreview.available_points} onClick={() => void redeemPoints()}>{busy ? 'Registrando canje…' : 'Confirmar canje y descontar puntos'}<Gift size={17}/></button>{redemptionResult && <p className="success-note"><CheckCircle2 size={16}/> Canje registrado para {redemptionResult.username}: −{Number(redemptionResult.points_deducted).toLocaleString('es-CO')} puntos. Saldo restante: {Number(redemptionResult.points_after).toLocaleString('es-CO')} puntos.</p>}</div>}<div className="admin-warning"><History size={17}/><p>Los canjes se guardan como movimientos independientes. No se eliminan las actividades completadas ni el historial de puntos originales.</p></div></section>}
 
       <footer className="app-footer"><span>WWF JUNTOS POR LA VIDA · SISTEMA DE PUNTOS</span><span>Participa. Descubre. Suma.</span></footer>
     </main>
